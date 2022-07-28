@@ -164,35 +164,49 @@ static void FloydSteinbergApply(uint_fast8_t n, int32_t *err, RGB *c) {
   memcpy(c, &result_u32, 4);
 }
 
+template<bool left, bool right, bool below>
+static void inline FloydSteinbergIter(RGB *row, RGB *row_next, size_t x) {
+  RGB orig = row[x];
+  RGB c = ChooseColorRGB(orig);
+  c.a = 255;
+  int32_t err[4] = {
+    (int) orig.r - c.r,
+    (int) orig.g - c.g,
+    (int) orig.b - c.b,
+    0,
+  };
+
+  row[x] = c;
+  if constexpr (right)
+    FloydSteinbergApply(7, &err[0], row+x+1);
+
+  if constexpr (below) {
+    FloydSteinbergApply(5, &err[0], row_next+x);
+    if constexpr (left) 
+      FloydSteinbergApply(3, &err[0], row_next+x-1);
+    if constexpr (right)
+      FloydSteinbergApply(1, &err[0], row_next+x+1);
+  }
+}
+
 static void __attribute__ ((noinline)) FloydSteinberg(void) {
   ChooseColorRGB_Init();
   for (size_t y=0; y<img_h-1; y++) {
     RGB *row = img + y*img_w;
     RGB *row_next = row + img_w;
-    for (size_t x=0; x<img_w; x++) {
-      RGB orig = row[x];
-      RGB c = ChooseColorRGB(orig);
-      c.a = 255;
-      int32_t err[4] = {
-        (int) orig.r - c.r,
-        (int) orig.g - c.g,
-        (int) orig.b - c.b,
-        0,
-      };
-
-      row[x] = c;
-      //if (x+1 < img_w)
-        FloydSteinbergApply(7, &err[0], row+x+1);
-
-      //if (y+1 < img_h) {
-        FloydSteinbergApply(5, &err[0], row_next+x);
-        //if (x > 0)
-          FloydSteinbergApply(3, &err[0], row_next+x-1);
-        //if (x+1 < img_w)
-          FloydSteinbergApply(1, &err[0], row_next+x+1);
-      //}
+    FloydSteinbergIter<false, true, true>(row, row_next, 0);
+    for (size_t x=1; x<img_w-1; x++) {
+      FloydSteinbergIter<true, true, true>(row, row_next, x);
     }
+    FloydSteinbergIter<true, false, true>(row, row_next, 0);
   }
+  
+  RGB *row = img + (img_h-1)*img_w;
+  FloydSteinbergIter<false, true, false>(row, NULL, 0);
+  for (size_t x=1; x<img_w-1; x++) {
+    FloydSteinbergIter<true, true, false>(row, NULL, x);
+  }
+  FloydSteinbergIter<true, false, false>(row, NULL, 0);
 }
 
 int main(int argc, char **argv) {
