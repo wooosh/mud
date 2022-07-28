@@ -3,6 +3,7 @@
 #include "spng.h"
 #include "fpng.h"
 
+#include <immintrin.h>
 #include <sys/types.h>
 #include <cstdint>
 #include <cstdio>
@@ -84,7 +85,7 @@ static void HandleArguments(int argc, char **argv) {
   }
 }
 
-static inline uint32_t RGBDistance(RGB x, RGB y) {
+static  uint32_t RGBDistance(RGB x, RGB y) {
   int r_dist = x.r - y.r;
   int g_dist = x.g - y.g;
   int b_dist = x.b - y.b;
@@ -95,21 +96,21 @@ static inline uint32_t RGBDistance(RGB x, RGB y) {
 static void ChooseColorRGB_Init(void) {
   /* calculate palette radius */
   for (uint_fast8_t i=0; i<palette_len; i++) {
-    uint32_t radius = UINT32_MAX;
+    uint32_t min_dist = UINT32_MAX;
     for (uint_fast8_t j=0; j<palette_len; j++) {
       if (i == j) continue;
       uint32_t dist = RGBDistance(palette[i], palette[j]);
-      if (dist < radius) {
-        radius = dist;
+      if (dist < min_dist) {
+        min_dist = dist;
       }
     }
-    palette_radius[i] = radius;
+    palette_radius[i] = min_dist;
   }
 }
 
 /* select the closest color from the palette using squared euclidean distance
  * in RGB colorspace */
-static RGB ChooseColorRGB(RGB c) {
+static __attribute__((noinline)) RGB ChooseColorRGB(RGB c) {
   static RGB color;
   static uint32_t max_dist_reuse = 0;
 
@@ -134,48 +135,62 @@ static RGB ChooseColorRGB(RGB c) {
   return color;
 }
 
-static inline uint8_t ClampU8(int x) {
-  if (x > 255) x = 255;
-  else if (x < 0) x = 0;
-  return x;
-}
+static void FloydSteinbergApply(uint_fast8_t n, int32_t *err, RGB *c) {
+  const __m128i min_v = _mm_set1_epi32(0);
+  const __m128i max_v = _mm_set1_epi32(255);
+  const __m128i n_v = _mm_set1_epi32(n);
+  
+  const __m128i c_v = _mm_set_epi32(c->r, c->g, c->b, 0);
+  const __m128i err_v = _mm_set_epi32(err[0], err[1], err[2], 0);
 
-static inline RGB FloydSteinbergApply(uint_fast8_t n, int_fast16_t err[3], RGB c) {
-  RGB result = {
-    .r = ClampU8(c.r + ((err[0]*n) >> 4)),
-    .g = ClampU8(c.g + ((err[1]*n) >> 4)),
-    .b = ClampU8(c.b + ((err[2]*n) >> 4)),
-    .a = 255
-  };
-  return result; 
+  __m128i result_v;
+  /* ((err[i] * n)>>4) + c[i] */
+  result_v = _mm_mullo_epi32(err_v, n_v);
+  result_v = _mm_srai_epi32(result_v, 4);
+  result_v = _mm_add_epi32(result_v, c_v);
+
+  /* clamp to 0-255 */
+  result_v = _mm_max_epi32(result_v, min_v);
+  result_v = _mm_min_epi32(result_v, max_v);
+
+  /* uint32_t[4] -> uint8_t[4] -> uint32_t -> RGB*/
+  result_v = _mm_shuffle_epi8(result_v, _mm_set_epi8(
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+    0, 4, 8, 12
+  ));
+  uint32_t result_u32 = _mm_extract_epi32(result_v, 0) | 0xFF000000;
+  memcpy(c, &result_u32, 4);
 }
 
 static void __attribute__ ((noinline)) FloydSteinberg(void) {
   ChooseColorRGB_Init();
-  for (size_t y=0; y<img_h; y++) {
+  for (size_t y=0; y<img_h-1; y++) {
     RGB *row = img + y*img_w;
     RGB *row_next = row + img_w;
     for (size_t x=0; x<img_w; x++) {
       RGB orig = row[x];
       RGB c = ChooseColorRGB(orig);
       c.a = 255;
-      int_fast16_t err[3] = {
+      int32_t err[4] = {
         (int) orig.r - c.r,
         (int) orig.g - c.g,
         (int) orig.b - c.b,
+        0,
       };
 
       row[x] = c;
-      if (x+1 < img_w)
-        row[x+1] = FloydSteinbergApply(7, err, row[x+1]);
+      //if (x+1 < img_w)
+        FloydSteinbergApply(7, &err[0], row+x+1);
 
-      if (y+1 < img_h) {
-        row_next[x] = FloydSteinbergApply(5, err, row_next[x]);
-        if (x > 0)
-          row_next[x-1] = FloydSteinbergApply(3, err, row_next[x-1]);
-        if (x+1 < img_w)
-          row_next[x+1] = FloydSteinbergApply(1, err, row_next[x+1]);
-      }
+      //if (y+1 < img_h) {
+        FloydSteinbergApply(5, &err[0], row_next+x);
+        //if (x > 0)
+          FloydSteinbergApply(3, &err[0], row_next+x-1);
+        //if (x+1 < img_w)
+          FloydSteinbergApply(1, &err[0], row_next+x+1);
+      //}
     }
   }
 }
