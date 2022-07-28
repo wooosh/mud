@@ -1,3 +1,5 @@
+/* mud - mini dither - written by wooosh - MIT licensed */
+
 #include "spng.h"
 #include "fpng.h"
 
@@ -15,6 +17,7 @@ struct RGB {
 
 static char *output_filename;
 static RGB palette[255];
+static uint32_t palette_radius[255];
 static uint_fast8_t palette_len = 0;
 static RGB *img = NULL;
 static unsigned img_w, img_h;
@@ -81,32 +84,59 @@ static void HandleArguments(int argc, char **argv) {
   }
 }
 
+static inline uint32_t RGBDistance(RGB x, RGB y) {
+  int r_dist = x.r - y.r;
+  int g_dist = x.g - y.g;
+  int b_dist = x.b - y.b;
+
+  return r_dist*r_dist + g_dist*g_dist + b_dist*b_dist;
+}
+
+static void ChooseColorRGB_Init(void) {
+  /* calculate palette radius */
+  for (uint_fast8_t i=0; i<palette_len; i++) {
+    uint32_t radius = UINT32_MAX;
+    for (uint_fast8_t j=0; j<palette_len; j++) {
+      if (i == j) continue;
+      uint32_t dist = RGBDistance(palette[i], palette[j]);
+      if (dist < radius) {
+        radius = dist;
+      }
+    }
+    palette_radius[i] = radius;
+  }
+}
+
 /* select the closest color from the palette using squared euclidean distance
  * in RGB colorspace */
 static RGB ChooseColorRGB(RGB c) {
+  static RGB color;
+  static uint32_t max_dist_reuse = 0;
+
+  if (RGBDistance(c, color) < max_dist_reuse)
+    return color;
+ 
   /* log2(255^2 + 225^2 + 255^2) < 32 */
   uint32_t min_dist = UINT32_MAX;
-  RGB color = palette[0];
-  for (uint_fast8_t i=0; i<palette_len; i++) {
-    RGB p = palette[i];
-    
-    int r_dist = c.r - p.r;
-    int g_dist = c.g - p.g;
-    int b_dist = c.b - p.b;
-    
-    uint32_t dist = r_dist*r_dist + g_dist*g_dist + b_dist*b_dist;
+  uint_fast8_t i=0;
+  uint_fast8_t best=0;
+  color = palette[0];
+  for (; i<palette_len; i++) {
+    uint32_t dist = RGBDistance(c, palette[i]);
     if (dist < min_dist) {
-      color = p;
+      best = i;
       min_dist = dist;
     }
   }
-  
+  color = palette[best];
+  max_dist_reuse = palette_radius[best];
+
   return color;
 }
 
 static inline uint8_t ClampU8(int x) {
   if (x > 255) x = 255;
-  if (x < 0) x = 0;
+  else if (x < 0) x = 0;
   return x;
 }
 
@@ -121,6 +151,7 @@ static inline RGB FloydSteinbergApply(uint_fast8_t n, int_fast16_t err[3], RGB c
 }
 
 static void __attribute__ ((noinline)) FloydSteinberg(void) {
+  ChooseColorRGB_Init();
   for (size_t y=0; y<img_h; y++) {
     RGB *row = img + y*img_w;
     RGB *row_next = row + img_w;
@@ -134,12 +165,12 @@ static void __attribute__ ((noinline)) FloydSteinberg(void) {
         (int) orig.b - c.b,
       };
 
-      row[x]        = c;
+      row[x] = c;
       if (x+1 < img_w)
-        row[x+1]      = FloydSteinbergApply(7, err, row[x+1]);
+        row[x+1] = FloydSteinbergApply(7, err, row[x+1]);
 
       if (y+1 < img_h) {
-        row_next[x]   = FloydSteinbergApply(5, err, row_next[x]);
+        row_next[x] = FloydSteinbergApply(5, err, row_next[x]);
         if (x > 0)
           row_next[x-1] = FloydSteinbergApply(3, err, row_next[x-1]);
         if (x+1 < img_w)
