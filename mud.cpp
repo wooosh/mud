@@ -5,6 +5,8 @@
 
 #include <immintrin.h>
 #include <sys/types.h>
+#include <threads.h>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -16,11 +18,15 @@ struct RGB {
   uint8_t a; /* ignored, only used for padding purposes */
 };
 
+static char *input_filename;
 static char *output_filename;
 static RGB palette[255];
 static uint32_t palette_radius[255];
 static uint_fast8_t palette_len = 0;
+
 static RGB *img = NULL;
+//static struct atomic_flag 
+static std::atomic<unsigned> img_decoded_h = 0;
 static unsigned img_w, img_h;
 static size_t img_len;
 
@@ -43,12 +49,12 @@ static void HandleArguments(int argc, char **argv) {
     Die("syntax: mud <input filename> <output filename> <color1> [colorN]");
   argv++; /* skip argv[0] */
 
-  char *filename = *argv;
+  input_filename = *argv;
   argv++;
   output_filename = *argv;
   argv++;
 
-  FILE *png = fopen(filename, "rb");
+  FILE *png = fopen(input_filename, "rb");
   if (png == NULL)
     Die("error opening source image");
 
@@ -69,7 +75,7 @@ static void HandleArguments(int argc, char **argv) {
     Die("unable to get image size");
 
   img = (RGB *) malloc(img_len);
-  spng_decode_image(ctx, img, img_len, SPNG_FMT_RGBA8, 0); 
+  fclose(png);
 
   /* load palette using remaining arguments */
   while (*argv) {
@@ -83,6 +89,29 @@ static void HandleArguments(int argc, char **argv) {
     palette[palette_len] = RGBFromUint32(color);
     palette_len++;
   }
+}
+
+static int PngDecoderThread(void *arg) {
+  FILE *png = fopen(input_filename, "rb");
+  if (png == NULL)
+    Die("error opening source image");
+
+  spng_ctx *ctx = spng_ctx_new(0);
+  if (ctx == NULL)
+    Die("spng init failure");
+
+  spng_set_png_file(ctx, png);
+  spng_decode_image(ctx, NULL, 0, SPNG_FMT_RGBA8, SPNG_DECODE_PROGRESSIVE);
+
+  RGB *out = img;
+  size_t row_len = img_w * 4;
+  for (size_t i=0; i<img_h; i++) {
+    /* TODO: error handling, SPNG_EOI (end of image) */
+    spng_decode_row(ctx, out, row_len);
+    img_decoded_h++;
+    out += img_w;
+  }
+  return 0;
 }
 
 static  uint32_t RGBDistance(RGB x, RGB y) {
@@ -189,9 +218,10 @@ static void inline FloydSteinbergIter(RGB *row, RGB *row_next, size_t x) {
   }
 }
 
-static void __attribute__ ((noinline)) FloydSteinberg(void) {
+static int FloydSteinberg(void *arg) {
   ChooseColorRGB_Init();
   for (size_t y=0; y<img_h-1; y++) {
+    while (img_decoded_h <= y+1) thrd_yield();
     RGB *row = img + y*img_w;
     RGB *row_next = row + img_w;
     FloydSteinbergIter<false, true, true>(row, row_next, 0);
@@ -200,18 +230,26 @@ static void __attribute__ ((noinline)) FloydSteinberg(void) {
     }
     FloydSteinbergIter<true, false, true>(row, row_next, 0);
   }
-  
+  while (img_decoded_h < img_h) thrd_yield();
   RGB *row = img + (img_h-1)*img_w;
   FloydSteinbergIter<false, true, false>(row, NULL, 0);
   for (size_t x=1; x<img_w-1; x++) {
     FloydSteinbergIter<true, true, false>(row, NULL, x);
   }
   FloydSteinbergIter<true, false, false>(row, NULL, 0);
+  return 0;
 }
 
 int main(int argc, char **argv) {
-  HandleArguments(argc, argv); 
-  FloydSteinberg();
+  HandleArguments(argc, argv);
+
+  thrd_t decoder_thrd, dither_thrd;
+  thrd_create(&decoder_thrd, PngDecoderThread, NULL);
+  thrd_create(&dither_thrd, FloydSteinberg, NULL);
+  int res;
+  thrd_join(dither_thrd, &res);
+  //PngDecoderThread(NULL); 
+  //FloydSteinberg(NULL);
   /* TODO: error checking */
   fpng::fpng_encode_image_to_file(output_filename, img, img_w, img_h, 4);
   free(img);
